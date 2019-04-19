@@ -8,6 +8,7 @@ import geopandas as gpd
 import math
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 
 ### Functions for summary stats of crimes data
@@ -15,7 +16,7 @@ import seaborn as sns
 def groupby_major_crime_types(data, threshold, fil=None):
     '''
     Find the number and percentage of crimes for each major crime type.
-    
+
     Inputs:
         - data: (DataFrame) crime dataset.
         - threshold: (float) a percentage threshold (e.g. 0.03) that determines
@@ -26,13 +27,13 @@ def groupby_major_crime_types(data, threshold, fil=None):
     '''
     if fil is not None:
         data = data[fil]
-        
+
     by_type = data.primary_type.value_counts().to_frame().reset_index().\
               rename(columns={"index":"Crime Type", "primary_type":"Number"})
     by_type["Percent"] = by_type.Number / len(data)
     top_types = by_type[by_type.Percent > threshold]
-    
-    # Combine crime types that make up a fraction of total crimes that is 
+
+    # Combine crime types that make up a fraction of total crimes that is
     # below the threshold into "Other"
 
     new_row = len(top_types)
@@ -41,7 +42,7 @@ def groupby_major_crime_types(data, threshold, fil=None):
                                                     threshold].Number)
     top_types.loc[new_row, 'Percent'] = top_types.loc[new_row, 'Number'] / \
                                         sum(top_types.Number)
-    
+
     top_types = top_types.astype({'Number': int})
 
     return top_types
@@ -50,7 +51,7 @@ def groupby_major_crime_types(data, threshold, fil=None):
 def plot_donut_chart(data, labels, sizes, title=None, colors=None):
     '''
     Plot donut chart for data.
-    
+
     Inputs:
         - data: a Pandas Dataframe
         - labels: (str) column name of the dataframe as donut chart labels
@@ -64,7 +65,7 @@ def plot_donut_chart(data, labels, sizes, title=None, colors=None):
     explode = [0.05] * len(data)
 
     fig1, ax1 = plt.subplots(figsize=(8,6))
-    ax1.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors,  
+    ax1.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors,
             startangle=90, pctdistance=0.85, explode = explode)
 
     centre_circle = plt.Circle((0,0),0.50,fc='white')
@@ -86,7 +87,7 @@ def get_crime_type_data(crime_type, crimes_data, year=None):
     '''
     Get crime data of a specific crime type in a specific year (optional).
 
-    Input: 
+    Input:
         - crime_type: (str) a crime type in upper cases
         - crimes_data: (DataFrame) the crimes dataframe
         - (optional) year: (str) year
@@ -101,24 +102,27 @@ def get_crime_type_data(crime_type, crimes_data, year=None):
 
 def get_top_blocks(crime_type_data):
     '''
-    Get block groups and the corresponding numbers of crime reports in the 
+    Get block groups and the corresponding numbers of crime reports in the
     blocks, sorted from the highest number to the lowest.
 
     Input:
         - crime_type_data: (DataFrame) a crimes dataset
 
-    Returns: a Pandas DataFrame of block group GEOIDs and crime counts 
+    Returns: a Pandas DataFrame of block group GEOIDs and crime counts
 
     '''
-    top_blocks = crime_type_data.groupby('GEOID').size(). \
+    top_blocks = crime_type_data.groupby(['GEOID', 'population']).size(). \
                  sort_values(ascending=False).reset_index()
-    top_blocks.columns = ['GEOID', 'count']
+    top_blocks.columns = ['GEOID', 'population', 'count']
 
     # create a table of population by GEOID
     # https://stackoverflow.com/a/35268906/1281879
-    pops = crime_type_data.groupby(['GEOID','population']).size().reset_index().rename(columns={0:'number'})
+    # pops = crime_type_data.groupby(['GEOID','population']).size().reset_index().rename(columns={0:'number'})
 
-    top_blocks = top_blocks.merge(pops, on='GEOID', how='inner')
+    # top_blocks = top_blocks.merge(pops, on='GEOID', how='inner')
+
+    top_blocks['density'] = top_blocks['count']/top_blocks['population'] * 100
+    #top_blocks.replace(np.inf, np.nan)
 
     return top_blocks
 
@@ -128,8 +132,8 @@ def map_blocks(top_blocks, blocks_geodata, normalizeByPopulation=True):
     Generate heat map of crime report counts at block-group level.
 
     Input:
-        - top_blocks: DataFrame of block group GEOIDs and crime counts 
-        - blocks_geodata: DataFrame containing block roup GEOIDs and 
+        - top_blocks: DataFrame of block group GEOIDs and crime counts
+        - blocks_geodata: DataFrame containing block group GEOIDs and
                           their geometry information
         - normalizeByPopulation: (bool) whether or not to normalize the plot by population
 
@@ -137,17 +141,23 @@ def map_blocks(top_blocks, blocks_geodata, normalizeByPopulation=True):
     # Merge top blocks with geographical information
     top_blocks = top_blocks.merge(blocks_geodata, on='GEOID', how='left')
 
+    # replace divide-by-zero spots with 1. (for population = 0)
+    top_blocks['density'] = top_blocks['density'].replace([np.inf, -np.inf], 1)
+    top_blocks['count'] = top_blocks['count'].replace(0, 0.001)
+
     # normalize by population
     if normalizeByPopulation:
         # remove rows where count or population is 0.
         # https://stackoverflow.com/a/27020741/1281879
-        top_blocks = top_blocks[(top_blocks != 0).all(1)]
+        # top_blocks = top_blocks[(top_blocks != 0).all(1)]
+        # top_blocks[top_blocks['population'] == 0]['population'] = 1
+        # TODO this part is broken
 
-        top_blocks['measure'] = top_blocks['count']/top_blocks['population']
-        plot_title = 'Crimes per person')
+        top_blocks['measure'] = top_blocks['density']
+        plot_title = ('Crimes per person')
     else:
         top_blocks['measure'] = top_blocks['count']
-        plot_title = 'Number of crimes')
+        plot_title = ('Number of crimes')
 
     # Convert to geodataframe
     top_blocks = gpd.GeoDataFrame(top_blocks, geometry='geometry')
@@ -163,15 +173,15 @@ def map_blocks(top_blocks, blocks_geodata, normalizeByPopulation=True):
 def describe_blocks(crime_type, top_blocks, census, outliers=None, plot=True):
     '''
     Calculate summary stats on block group ACS variables and (optionally) plot
-    their correlation with the number of crimes of a specific type in the 
+    their correlation with the number of crimes of a specific type in the
     block.
 
     Inputs:
         - crime_type: (str) type of crime
-        - top_blocks: DataFrame of block group GEOIDs and crime counts 
+        - top_blocks: DataFrame of block group GEOIDs and crime counts
         - census: DataFrame containing ACS variables
         - (optional) outliers: (list) list of GEOIDs to drop out of the data
-        - (optional) plot: (bool) whether shows scatter plots of the number 
+        - (optional) plot: (bool) whether shows scatter plots of the number
                     of crimes with the ACS variables. Default is True.
 
     '''
@@ -181,12 +191,12 @@ def describe_blocks(crime_type, top_blocks, census, outliers=None, plot=True):
         top_blocks = top_blocks[~top_blocks.GEOID.isin(outliers)]
 
     # Get ACS variable for blocks with most battery reports
-    top_blocks = top_blocks.merge(census, on='GEOID', how='left')
+    top_blocks = top_blocks.merge(census, on=('GEOID', 'population'), how='left')
     # Drop rows with no median income value
     top_blocks = top_blocks[top_blocks.median_income > 0]
 
     # Generate mean and sd of ACS variables
-    print(top_blocks.dropna().describe()[['population', 'median_income', 
+    print(top_blocks.dropna().describe()[['population', 'median_income',
                                            'owner_occupancy_rate']][1:])
     if plot:
         # Plot relationships betwen number of reports and ACS variables
@@ -198,9 +208,3 @@ def describe_blocks(crime_type, top_blocks, census, outliers=None, plot=True):
         plt.title('{} and block owner occupancy rate'.format(crime_type))
 
         plt.show()
-
-
-
-
-
-
